@@ -33,8 +33,8 @@ powershell -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 list -Proje
 ```
 
 `init` creates `turn/0001` as the baseline. The default snapshot store is
-outside the project at `%LOCALAPPDATA%\shadow-git-turns\...`. Use `-Store`
-to choose another local path.
+outside the project at `E:\ShadowGitRepo\<project-name>`. Use `-Store` to
+choose another local path.
 
 ## How to integrate with an agent
 
@@ -87,12 +87,47 @@ removes the cache file. If the prompt cache is unavailable, it falls back to the
 existing task-description fields. Snapshot failures are logged to
 `%LOCALAPPDATA%\shadow-git-turns\codex-hook-errors.log` and do not block Codex.
 
-Test the adapter without starting Codex:
+#### Installation
+
+1. Initialize Shadow Git once in every project to be captured:
 
 ```powershell
-'{"hook_event_name":"Stop","cwd":"D:\\path\\to\\your\\repo","session_id":"test"}' |
-  powershell -NoProfile -ExecutionPolicy Bypass -File E:\\ShadowGit\\codex-shadow-stop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 init -Project C:\src\my-project
 ```
+
+2. Create `%USERPROFILE%\.codex\hooks.json` if it does not already exist. If
+   it exists, make a backup first:
+
+```powershell
+Copy-Item "$env:USERPROFILE\.codex\hooks.json" "$env:USERPROFILE\.codex\hooks.json.bak"
+```
+
+3. Add the `UserPromptSubmit` and `Stop` command entries shown above beneath the
+   top-level `hooks` object. When either event already exists, append the new
+   command object to its `hooks` array; do not replace existing entries.
+
+4. Restart Codex CLI. Each submitted prompt is captured first, then the `Stop`
+   hook creates one snapshot when that turn completes.
+
+#### Verification
+
+Run this sequence with a disposable session and turn id. It exercises both
+hooks and confirms that the Stop hook uses the cached original prompt:
+
+```powershell
+$promptPayload = '{"hook_event_name":"UserPromptSubmit","prompt":"verify shadow hook write","session_id":"shadow-test","turn_id":"1"}'
+$promptPayload | powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\codex-shadow-prompt.ps1
+
+$stopPayload = '{"hook_event_name":"Stop","cwd":"C:\\src\\my-project","session_id":"shadow-test","turn_id":"1"}'
+$stopPayload | powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\codex-shadow-stop.ps1
+
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 list -Project C:\src\my-project
+```
+
+Replace `C:\src\my-project` with the repository initialized in step 1. The
+last command should show a new turn whose subject contains
+`task=verify shadow hook write`. A successful Stop hook removes its temporary
+prompt file from `%LOCALAPPDATA%\shadow-git-turns\prompts`.
 
 ### When an app-server client is appropriate
 
