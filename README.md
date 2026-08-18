@@ -45,26 +45,46 @@ A file watcher alone cannot reliably identify user-instruction boundaries.
 
 ### Automatic Codex CLI integration
 
-For the normal Codex CLI, use the local `Stop` hook instead of building an
-app-server client. Add this entry to the existing `Stop` array in
-`%USERPROFILE%\.codex\hooks.json` (merge it with any existing hooks):
+For the normal Codex CLI, use a local `UserPromptSubmit` hook together with the
+`Stop` hook instead of building an app-server client. Add these entries to
+`%USERPROFILE%\.codex\hooks.json` (merge them with any existing hooks):
 
 ```json
 {
-  "hooks": [
-    {
-      "type": "command",
-      "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-shadow-stop.ps1\"",
-      "timeoutSec": 20,
-      "statusMessage": "Saving local shadow snapshot"
-    }
-  ]
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-shadow-prompt.ps1\"",
+            "timeout": 5,
+            "statusMessage": "Capturing original user prompt"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-shadow-stop.ps1\"",
+            "timeout": 20,
+            "statusMessage": "Saving local shadow snapshot"
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-Codex sends the hook payload on stdin. The adapter reads `cwd`, adds the
-session/turn identifiers to the snapshot message, and invokes `snapshot` once
-when the turn stops. Snapshot failures are logged to
+Codex sends the hook payload on stdin. `UserPromptSubmit` caches the normalized,
+240-character user prompt by session and turn. The Stop adapter consumes that
+prompt first, adds the session/turn identifiers, invokes `snapshot` once, then
+removes the cache file. If the prompt cache is unavailable, it falls back to the
+existing task-description fields. Snapshot failures are logged to
 `%LOCALAPPDATA%\shadow-git-turns\codex-hook-errors.log` and do not block Codex.
 
 Test the adapter without starting Codex:
