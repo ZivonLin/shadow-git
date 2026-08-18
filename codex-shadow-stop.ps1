@@ -37,6 +37,36 @@ function Get-PayloadText {
     return ''
 }
 
+function Get-PromptCachePath {
+    param(
+        [string]$SessionId,
+        [string]$TurnId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SessionId) -or [string]::IsNullOrWhiteSpace($TurnId)) {
+        return $null
+    }
+
+    $safeSessionId = $SessionId -replace '[^A-Za-z0-9._-]', '_'
+    $safeTurnId = $TurnId -replace '[^A-Za-z0-9._-]', '_'
+    $cacheRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'shadow-git-turns') 'prompts'
+    return Join-Path $cacheRoot "$safeSessionId-$safeTurnId.txt"
+}
+
+function Get-CapturedUserPrompt {
+    param([object]$Payload)
+
+    $cachePath = Get-PromptCachePath -SessionId (Get-PayloadText -Payload $Payload -Name 'session_id') -TurnId (Get-PayloadText -Payload $Payload -Name 'turn_id')
+    if (-not $cachePath -or -not (Test-Path -LiteralPath $cachePath)) {
+        return [PSCustomObject]@{ Text = ''; CachePath = $null }
+    }
+
+    return [PSCustomObject]@{
+        Text = (Get-Content -LiteralPath $cachePath -Raw).Trim()
+        CachePath = $cachePath
+    }
+}
+
 function Get-TaskDescription {
     param([object]$Payload)
 
@@ -68,7 +98,11 @@ try {
     }
 
     $parts = @('Codex turn complete')
-    $description = Get-TaskDescription -Payload $payload
+    $capturedPrompt = Get-CapturedUserPrompt -Payload $payload
+    $description = $capturedPrompt.Text
+    if ([string]::IsNullOrWhiteSpace($description)) {
+        $description = Get-TaskDescription -Payload $payload
+    }
     if ($description.Length -gt 240) {
         $description = $description.Substring(0, 237) + '...'
     }
@@ -84,9 +118,22 @@ try {
         $parts += "turn=$($turnProperty.Value)"
     }
 
-    & $SnapshotScript -Command snapshot -Project $project -Message ($parts -join ' ') | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-HookError "snapshot exited with code $LASTEXITCODE for $project"
+    try {
+        & $SnapshotScript -Command snapshot -Project $project -Message ($parts -join ' ') | Out-Null
+        $snapshotExitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($capturedPrompt.CachePath) {
+            try {
+                Remove-Item -LiteralPath $capturedPrompt.CachePath -Force -ErrorAction Stop
+            }
+            catch {
+                Write-HookError "failed to remove prompt cache: $($_.Exception.Message)"
+            }
+        }
+    }
+    if ($snapshotExitCode -ne 0) {
+        Write-HookError "snapshot exited with code $snapshotExitCode for $project"
     }
 }
 catch {
