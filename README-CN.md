@@ -53,7 +53,17 @@ Git 仓库的内部实现。若需要自动记录，应该在 Agent 的回合完
 
 常规 Codex CLI 可以通过本地 `UserPromptSubmit` 和 `Stop` Hook 自动保存快照，无需自行实现 app-server 客户端。
 
-将下列配置合并到 `%USERPROFILE%\.codex\hooks.json` 的顶层 `hooks` 对象中：
+通过一条命令即可为项目安装两个 Hook：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-codex -Project C:\src\my-project
+```
+
+该命令会按需创建基线快照，将缺失的 Shadow Git Hook 合并到
+`%USERPROFILE%\.codex\hooks.json`，并在修改已有配置前创建带时间戳的备份。重复执行不会重复添加已安装的 Hook；完成后请重启 Codex CLI。
+请在克隆得到的 Shadow Git 目录中执行该命令。
+
+如需手动安装，请将下列配置合并到 `%USERPROFILE%\.codex\hooks.json` 的顶层 `hooks` 对象中：
 
 ```json
 {
@@ -90,21 +100,15 @@ Git 仓库的内部实现。若需要自动记录，应该在 Agent 的回合完
 
 #### 安装步骤
 
-1. 对每个需要记录的项目初始化一次 Shadow Git：
+1. 对每个需要记录的项目运行一次安装命令：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 init -Project C:\src\my-project
+powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-codex -Project C:\src\my-project
 ```
 
-2. 如果 `%USERPROFILE%\.codex\hooks.json` 不存在，请创建它；如果已存在，先备份：
+2. 安装命令会按需初始化本地基线，创建不存在的 `%USERPROFILE%\.codex\hooks.json`，保留已有 Hook，并在修改已有配置前创建带时间戳的备份。
 
-```powershell
-Copy-Item "$env:USERPROFILE\.codex\hooks.json" "$env:USERPROFILE\.codex\hooks.json.bak"
-```
-
-3. 将上方的 `UserPromptSubmit` 和 `Stop` 命令项添加到顶层 `hooks` 对象中。若对应事件已经存在，请把新命令对象追加到该事件的 `hooks` 数组，不要替换已有 Hook。
-
-4. 重启 Codex CLI。之后每次提交用户输入时会先记录原始 prompt，并在该回合结束时由 `Stop` Hook 创建一个快照。
+3. 重启 Codex CLI。之后每次提交用户输入时会先记录原始 prompt，并在该回合结束时由 `Stop` Hook 创建一个快照。
 
 #### 验证安装
 
@@ -120,7 +124,7 @@ $stopPayload | powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\
 powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 list -Project C:\src\my-project
 ```
 
-将 `C:\src\my-project` 替换为第 1 步已初始化的仓库。最后一条命令应显示新的回合，提交说明中包含 `task=verify shadow hook write`。Stop Hook 成功后会删除 `%LOCALAPPDATA%\shadow-git-turns\prompts` 中对应的临时 prompt 文件。
+将 `C:\src\my-project` 替换为第 1 步已安装的仓库。最后一条命令应显示新的回合，提交说明中包含 `task=verify shadow hook write`。Stop Hook 成功后会删除 `%LOCALAPPDATA%\shadow-git-turns\prompts` 中对应的临时 prompt 文件。
 
 ### 何时使用 app-server 客户端
 

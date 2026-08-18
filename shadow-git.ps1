@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'init', 'snapshot', 'diff', 'list', 'path')]
+    [ValidateSet('help', 'init', 'snapshot', 'diff', 'list', 'path', 'install-codex')]
     [string]$Command = 'help',
 
     [string]$Project = (Get-Location).Path,
@@ -14,6 +14,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ToolRoot = Split-Path -Parent $PSCommandPath
 
 function Get-ProjectRoot {
     param([string]$Path)
@@ -248,6 +249,169 @@ function Show-Diff {
     Invoke-ShadowGit -Arguments $args | ForEach-Object { Write-Output $_ }
 }
 
+function Ensure-ShadowBaseline {
+    Initialize-Shadow
+    if (-not (Get-ShadowHead)) {
+        return Save-Snapshot -SnapshotMessage 'baseline'
+    }
+    return $null
+}
+
+function Get-CodexHooksPath {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        throw 'USERPROFILE is not set; cannot locate the Codex hooks configuration.'
+    }
+    return Join-Path (Join-Path $env:USERPROFILE '.codex') 'hooks.json'
+}
+
+function Read-CodexHooksConfiguration {
+    param([string]$HooksPath)
+
+    $hadExistingFile = Test-Path -LiteralPath $HooksPath
+    if ($hadExistingFile) {
+        $raw = Get-Content -LiteralPath $HooksPath -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            $configuration = [PSCustomObject]@{}
+        }
+        else {
+            try {
+                $configuration = $raw | ConvertFrom-Json
+            }
+            catch {
+                throw "Cannot parse existing Codex hooks configuration: $HooksPath"
+            }
+        }
+    }
+    else {
+        $configuration = [PSCustomObject]@{}
+    }
+
+    if ($configuration -is [System.Array] -or $null -eq $configuration) {
+        throw "Codex hooks configuration must contain a JSON object: $HooksPath"
+    }
+
+    $hooksProperty = $configuration.PSObject.Properties['hooks']
+    if (-not $hooksProperty) {
+        $configuration | Add-Member -NotePropertyName 'hooks' -NotePropertyValue ([PSCustomObject]@{})
+    }
+    elseif ($null -eq $hooksProperty.Value) {
+        $hooksProperty.Value = [PSCustomObject]@{}
+    }
+    elseif ($hooksProperty.Value -isnot [PSCustomObject]) {
+        throw "The hooks property must be a JSON object: $HooksPath"
+    }
+
+    return [PSCustomObject]@{
+        Configuration = $configuration
+        HadExistingFile = $hadExistingFile
+    }
+}
+
+function Test-CodexCommandHook {
+    param(
+        [object]$Configuration,
+        [string]$EventName,
+        [string]$CommandWindows
+    )
+
+    $eventProperty = $Configuration.hooks.PSObject.Properties[$EventName]
+    if (-not $eventProperty) {
+        return $false
+    }
+
+    foreach ($registration in @($eventProperty.Value)) {
+        if ($null -eq $registration) {
+            continue
+        }
+        $registeredHooks = $registration.PSObject.Properties['hooks']
+        if (-not $registeredHooks) {
+            continue
+        }
+        foreach ($hook in @($registeredHooks.Value)) {
+            if ($null -eq $hook) {
+                continue
+            }
+            $type = $hook.PSObject.Properties['type']
+            $command = $hook.PSObject.Properties['commandWindows']
+            if ($type -and $command -and $type.Value -eq 'command' -and $command.Value -eq $CommandWindows) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Add-CodexCommandHook {
+    param(
+        [object]$Configuration,
+        [string]$EventName,
+        [string]$CommandWindows,
+        [int]$Timeout,
+        [string]$StatusMessage
+    )
+
+    $registration = [PSCustomObject]@{
+        hooks = @(
+            [PSCustomObject]@{
+                type = 'command'
+                commandWindows = $CommandWindows
+                timeout = $Timeout
+                statusMessage = $StatusMessage
+            }
+        )
+    }
+    $eventProperty = $Configuration.hooks.PSObject.Properties[$EventName]
+    if ($eventProperty) {
+        $eventProperty.Value = @($eventProperty.Value) + $registration
+    }
+    else {
+        $Configuration.hooks | Add-Member -NotePropertyName $EventName -NotePropertyValue @($registration)
+    }
+}
+
+function Install-CodexHooks {
+    $baseline = Ensure-ShadowBaseline
+    if ($baseline) {
+        Write-Output "Created baseline $($baseline.Ref) at $($baseline.Store)"
+    }
+
+    $hooksPath = Get-CodexHooksPath
+    $hooksDirectory = Split-Path -Parent $hooksPath
+    New-Item -ItemType Directory -Force -Path $hooksDirectory | Out-Null
+    $state = Read-CodexHooksConfiguration -HooksPath $hooksPath
+    $promptCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-shadow-prompt.ps1')`""
+    $stopCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-shadow-stop.ps1')`""
+    $addedEvents = @()
+
+    if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'UserPromptSubmit' -CommandWindows $promptCommand)) {
+        Add-CodexCommandHook -Configuration $state.Configuration -EventName 'UserPromptSubmit' -CommandWindows $promptCommand -Timeout 5 -StatusMessage 'Capturing original user prompt'
+        $addedEvents += 'UserPromptSubmit'
+    }
+    if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $stopCommand)) {
+        Add-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $stopCommand -Timeout 20 -StatusMessage 'Saving local shadow snapshot'
+        $addedEvents += 'Stop'
+    }
+
+    if ($addedEvents.Count -eq 0) {
+        Write-Output "Codex hooks are already installed: $hooksPath"
+        return
+    }
+
+    $backupPath = $null
+    if ($state.HadExistingFile) {
+        $backupPath = "$hooksPath.backup-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        Copy-Item -LiteralPath $hooksPath -Destination $backupPath
+    }
+    $state.Configuration | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $hooksPath -Encoding utf8
+
+    Write-Output "Installed Codex hooks: $($addedEvents -join ', ')"
+    Write-Output "Configuration: $hooksPath"
+    if ($backupPath) {
+        Write-Output "Backup: $backupPath"
+    }
+    Write-Output 'Restart Codex CLI to load the updated hooks.'
+}
+
 if ($Command -eq 'help') {
     Write-Output @'
 Local shadow Git snapshots
@@ -258,11 +422,13 @@ Commands:
   diff      Compare two snapshots: -From 0001 -To 0002 (To defaults to latest).
   list      List all snapshots.
   path      Print the local shadow repository path.
+  install-codex  Initialize the project and install Codex CLI hooks.
 
 Examples:
   .\shadow-git.ps1 init -Project .
   .\shadow-git.ps1 snapshot -Message "implement login"
   .\shadow-git.ps1 diff -From 0001 -To 0002
+  .\shadow-git.ps1 install-codex -Project .
 '@
     exit 0
 }
@@ -275,9 +441,8 @@ Set-ShadowPaths -Root $script:ProjectRoot -StorePath $Store
 
 switch ($Command) {
     'init' {
-        Initialize-Shadow
-        if (-not (Get-ShadowHead)) {
-            $result = Save-Snapshot -SnapshotMessage 'baseline'
+        $result = Ensure-ShadowBaseline
+        if ($result) {
             Write-Output "Created baseline $($result.Ref) at $($result.Store)"
         }
         else {
@@ -297,5 +462,8 @@ switch ($Command) {
     'path' {
         Initialize-Shadow
         Write-Output $script:StoreRoot
+    }
+    'install-codex' {
+        Install-CodexHooks
     }
 }

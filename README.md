@@ -46,8 +46,21 @@ A file watcher alone cannot reliably identify user-instruction boundaries.
 ### Automatic Codex CLI integration
 
 For the normal Codex CLI, use a local `UserPromptSubmit` hook together with the
-`Stop` hook instead of building an app-server client. Add these entries to
-`%USERPROFILE%\.codex\hooks.json` (merge them with any existing hooks):
+`Stop` hook instead of building an app-server client. Install both hooks for a
+project with one command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-codex -Project C:\src\my-project
+```
+
+The command creates the baseline snapshot when needed, merges only missing
+Shadow Git hooks into `%USERPROFILE%\.codex\hooks.json`, and creates a
+timestamped backup before changing an existing configuration. It is safe to run
+again: installed hooks are not duplicated. Run it from the cloned Shadow Git
+directory, then restart Codex CLI after it finishes.
+
+For a manual installation, add these entries to `%USERPROFILE%\.codex\hooks.json`
+and merge them with any existing hooks:
 
 ```json
 {
@@ -89,24 +102,17 @@ existing task-description fields. Snapshot failures are logged to
 
 #### Installation
 
-1. Initialize Shadow Git once in every project to be captured:
+1. Run the installer once for every project to be captured:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 init -Project C:\src\my-project
+powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-codex -Project C:\src\my-project
 ```
 
-2. Create `%USERPROFILE%\.codex\hooks.json` if it does not already exist. If
-   it exists, make a backup first:
+2. The installer initializes the local baseline as needed, creates
+   `%USERPROFILE%\.codex\hooks.json` when absent, preserves existing hooks, and
+   creates a timestamped backup before modifying an existing configuration.
 
-```powershell
-Copy-Item "$env:USERPROFILE\.codex\hooks.json" "$env:USERPROFILE\.codex\hooks.json.bak"
-```
-
-3. Add the `UserPromptSubmit` and `Stop` command entries shown above beneath the
-   top-level `hooks` object. When either event already exists, append the new
-   command object to its `hooks` array; do not replace existing entries.
-
-4. Restart Codex CLI. Each submitted prompt is captured first, then the `Stop`
+3. Restart Codex CLI. Each submitted prompt is captured first, then the `Stop`
    hook creates one snapshot when that turn completes.
 
 #### Verification
