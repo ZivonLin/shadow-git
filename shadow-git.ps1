@@ -123,6 +123,43 @@ function Get-ShadowHead {
     }
 }
 
+function Sync-ShadowReviewWorktrees {
+    param([Parameter(Mandatory = $true)][string]$Commit)
+
+    $worktreeLines = & git -C $script:ShadowRepo worktree list --porcelain 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw (($worktreeLines | Out-String).Trim())
+    }
+
+    $worktreePath = $null
+    $reviewWorktrees = @()
+    foreach ($line in $worktreeLines) {
+        if ($line -like 'worktree *') {
+            $worktreePath = $line.Substring('worktree '.Length)
+        }
+        elseif ($line -eq 'branch refs/heads/shadow' -and $worktreePath) {
+            $reviewWorktrees += $worktreePath
+        }
+        elseif ([string]::IsNullOrWhiteSpace($line)) {
+            $worktreePath = $null
+        }
+    }
+
+    foreach ($reviewWorktree in $reviewWorktrees) {
+        if (-not (Test-Path -LiteralPath $reviewWorktree)) {
+            throw "Shadow review worktree is missing: $reviewWorktree"
+        }
+
+        # The branch ref moves via update-ref, so its checked-out worktree must refresh too.
+        $syncOutput = & git -C $reviewWorktree reset --hard --quiet $Commit 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to synchronize shadow review worktree $reviewWorktree`: $(($syncOutput | Out-String).Trim())"
+        }
+    }
+
+    return $reviewWorktrees.Count
+}
+
 function Initialize-Shadow {
     if (Test-ShadowInitialized) {
         & git -C $script:ShadowRepo config core.longpaths true
@@ -210,12 +247,21 @@ function Save-Snapshot {
     Invoke-ShadowGit -Arguments @('update-ref', "refs/turn/$turn", $commit) | Out-Null
     Invoke-ShadowGit -Arguments @('update-ref', "refs/tags/turn-$turn", $commit) | Out-Null
 
+    $synchronizedWorktrees = 0
+    if ($parent) {
+        $parentTree = Invoke-ShadowGitText -Arguments @('rev-parse', "$parent^{tree}")
+        if ($parentTree -ne $tree) {
+            $synchronizedWorktrees = Sync-ShadowReviewWorktrees -Commit $commit
+        }
+    }
+
     [PSCustomObject]@{
         Turn = $turn
         Ref = "turn/$turn"
         Commit = $commit
         Message = $SnapshotMessage
         Store = $script:StoreRoot
+        SynchronizedReviewWorktrees = $synchronizedWorktrees
     }
 }
 

@@ -151,7 +151,11 @@ Install [Fork](https://git-fork.com/) on Windows, then open the `repo` folder
 inside the printed shadow store path (run `path` to print it). The shadow
 repository has local tags such as `turn-0001` and `turn-0002`; select two tags
 in Fork and use its commit comparison/diff view. No account or remote is
-needed for this local review.
+needed for this local review. If you use a linked worktree on the `shadow`
+branch for visual review, each changed snapshot synchronizes that worktree to
+the new commit so additions and deletions do not accumulate in its Changes
+list. Treat that worktree as read-only; synchronization resets it to the latest
+shadow snapshot.
 
 ## Safety notes
 

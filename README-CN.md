@@ -136,6 +136,8 @@ Codex CLI 0.147.0 提供实验性的 JSON-RPC app-server 协议。只有在开�
 
 安装 [Fork](https://git-fork.com/) 后，运行 `path` 获取 Shadow Git 存储路径，并在 Fork 中打开该路径下的 `repo` 目录。仓库包含 `turn-0001`、`turn-0002` 等本地标签；选择两个标签后即可使用 Fork 的提交比较或差异视图。该流程不需要账户或远程仓库。
 
+若使用挂在 `shadow` 分支上的 linked worktree 进行可视化审阅，每次有内容变化的快照都会将该 worktree 同步到新提交，新增和删除文件不会持续堆积在 Changes 列表中。该 worktree 应仅用于审阅，同步时会将其重置到最新影子快照。
+
 ## 安全说明
 
 - Shadow Git 仓库仅保存在本地，且不配置远程地址。
