@@ -427,6 +427,8 @@ function Install-CodexHooks {
     $state = Read-CodexHooksConfiguration -HooksPath $hooksPath
     $promptCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-shadow-prompt.ps1')`""
     $stopCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-shadow-stop.ps1')`""
+    $historyPromptCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-session-history-prompt.ps1')`""
+    $historyStopCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $script:ToolRoot 'codex-session-history-stop.ps1')`""
     $addedEvents = @()
 
     if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'UserPromptSubmit' -CommandWindows $promptCommand)) {
@@ -436,6 +438,14 @@ function Install-CodexHooks {
     if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $stopCommand)) {
         Add-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $stopCommand -Timeout 20 -StatusMessage 'Saving local shadow snapshot'
         $addedEvents += 'Stop'
+    }
+    if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'UserPromptSubmit' -CommandWindows $historyPromptCommand)) {
+        Add-CodexCommandHook -Configuration $state.Configuration -EventName 'UserPromptSubmit' -CommandWindows $historyPromptCommand -Timeout 5 -StatusMessage 'Capturing full session prompt'
+        $addedEvents += 'UserPromptSubmit(session-history)'
+    }
+    if (-not (Test-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $historyStopCommand)) {
+        Add-CodexCommandHook -Configuration $state.Configuration -EventName 'Stop' -CommandWindows $historyStopCommand -Timeout 20 -StatusMessage 'Saving full session history'
+        $addedEvents += 'Stop(session-history)'
     }
 
     if ($addedEvents.Count -eq 0) {

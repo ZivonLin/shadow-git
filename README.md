@@ -46,7 +46,7 @@ A file watcher alone cannot reliably identify user-instruction boundaries.
 ### Automatic Codex CLI integration
 
 For the normal Codex CLI, use a local `UserPromptSubmit` hook together with the
-`Stop` hook instead of building an app-server client. Install both hooks for a
+`Stop` hook instead of building an app-server client. Install the hooks for a
 project with one command:
 
 ```powershell
@@ -54,7 +54,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
 ```
 
 The command creates the baseline snapshot when needed, merges only missing
-Shadow Git hooks into `%USERPROFILE%\.codex\hooks.json`, and creates a
+Shadow Git and session-history hooks into `%USERPROFILE%\.codex\hooks.json`, and creates a
 timestamped backup before changing an existing configuration. It is safe to run
 again: installed hooks are not duplicated. Run it from the cloned Shadow Git
 directory, then restart Codex CLI after it finishes.
@@ -75,6 +75,16 @@ and merge them with any existing hooks:
             "statusMessage": "Capturing original user prompt"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-session-history-prompt.ps1\"",
+            "timeout": 5,
+            "statusMessage": "Capturing full session prompt"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -85,6 +95,16 @@ and merge them with any existing hooks:
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-shadow-stop.ps1\"",
             "timeout": 20,
             "statusMessage": "Saving local shadow snapshot"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-session-history-stop.ps1\"",
+            "timeout": 20,
+            "statusMessage": "Saving full session history"
           }
         ]
       }
@@ -100,6 +120,24 @@ removes the cache file. If the prompt cache is unavailable, it falls back to the
 existing task-description fields. Snapshot failures are logged to
 `%LOCALAPPDATA%\shadow-git-turns\codex-hook-errors.log` and do not block Codex.
 
+### Full session history
+
+The installer also registers two independent hooks for complete conversation
+history. `codex-session-history-prompt.ps1` stores the full, untruncated prompt
+temporarily under `%LOCALAPPDATA%\codex-session-history\pending`. At `Stop`,
+`codex-session-history-stop.ps1` selects the matching `final_answer` from the
+session transcript under `%USERPROFILE%\.codex\sessions` and appends it with the
+prompt to:
+
+```text
+E:\codex-session-history\<workspace-name>\<session-id>.md
+```
+
+The Markdown header keeps the resolved workspace path. Each turn has a marker
+containing its `turn_id`, so a retried `Stop` event is idempotent. History errors
+are written to `%LOCALAPPDATA%\codex-session-history\hook-errors.log` and do not
+block Codex. The session-history hooks do not change Shadow Git snapshots.
+
 #### Installation
 
 1. Run the installer once for every project to be captured:
@@ -112,8 +150,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
    `%USERPROFILE%\.codex\hooks.json` when absent, preserves existing hooks, and
    creates a timestamped backup before modifying an existing configuration.
 
-3. Restart Codex CLI. Each submitted prompt is captured first, then the `Stop`
-   hook creates one snapshot when that turn completes.
+3. Restart Codex CLI. Each submitted prompt is captured first, then the two
+   `Stop` hooks create the Shadow Git snapshot and append the session history.
 
 #### Verification
 
@@ -134,6 +172,12 @@ Replace `C:\src\my-project` with the repository initialized in step 1. The
 last command should show a new turn whose subject contains
 `task=verify shadow hook write`. A successful Stop hook removes its temporary
 prompt file from `%LOCALAPPDATA%\shadow-git-turns\prompts`.
+
+The session-history integration has an automated regression test:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\tests\verify-codex-session-history-hooks.ps1
+```
 
 ### When an app-server client is appropriate
 
@@ -163,3 +207,7 @@ shadow snapshot.
 - Snapshot contents can include source code and untracked files; protect the
   local store and avoid snapshotting secrets or large generated directories.
 - The default staging behavior follows the project's `.gitignore` rules.
+- Session-history Markdown files contain complete user prompts and final agent
+  answers. They can include credentials, personal data, or proprietary source;
+  keep `E:\codex-session-history` access-restricted and do not add it to a
+  project repository or upload it without a separate content review.

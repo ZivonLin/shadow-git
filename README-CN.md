@@ -53,13 +53,13 @@ Git 仓库的内部实现。若需要自动记录，应该在 Agent 的回合完
 
 常规 Codex CLI 可以通过本地 `UserPromptSubmit` 和 `Stop` Hook 自动保存快照，无需自行实现 app-server 客户端。
 
-通过一条命令即可为项目安装两个 Hook：
+通过一条命令即可为项目安装这些 Hook：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-codex -Project C:\src\my-project
 ```
 
-该命令会按需创建基线快照，将缺失的 Shadow Git Hook 合并到
+该命令会按需创建基线快照，将缺失的 Shadow Git 和会话历史 Hook 合并到
 `%USERPROFILE%\.codex\hooks.json`，并在修改已有配置前创建带时间戳的备份。重复执行不会重复添加已安装的 Hook；完成后请重启 Codex CLI。
 请在克隆得到的 Shadow Git 目录中执行该命令。
 
@@ -78,6 +78,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
             "statusMessage": "Capturing original user prompt"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-session-history-prompt.ps1\"",
+            "timeout": 5,
+            "statusMessage": "Capturing full session prompt"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -90,6 +100,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
             "statusMessage": "Saving local shadow snapshot"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"E:\\ShadowGit\\codex-session-history-stop.ps1\"",
+            "timeout": 20,
+            "statusMessage": "Saving full session history"
+          }
+        ]
       }
     ]
   }
@@ -97,6 +117,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
 ```
 
 `UserPromptSubmit` 会按会话和回合缓存规范化后的原始用户输入，最长 240 个字符。`Stop` Hook 优先读取该缓存，将会话和回合 ID 加入提交说明，然后调用 `snapshot` 并删除缓存。缓存不可用时，它会回退到 Hook payload 中已有的任务描述字段。快照失败会记录在 `%LOCALAPPDATA%\shadow-git-turns\codex-hook-errors.log`，且不会阻断 Codex 会话。
+
+### 完整会话历史
+
+安装命令还会注册两个独立的会话历史 Hook。`codex-session-history-prompt.ps1`
+会将完整、未截断的用户输入临时保存到
+`%LOCALAPPDATA%\codex-session-history\pending`。回合结束时，
+`codex-session-history-stop.ps1` 会从 `%USERPROFILE%\.codex\sessions` 下的会话记录中
+找到当前 `turn_id` 对应的 `final_answer`，并将用户输入和 Agent 完整回答追加到：
+
+```text
+E:\codex-session-history\<工作空间目录名>\<session-id>.md
+```
+
+Markdown 文件头会保留解析后的完整工作空间路径；每个回合带有 `turn_id` 标记，
+重复触发 `Stop` 不会重复写入。历史记录错误会写入
+`%LOCALAPPDATA%\codex-session-history\hook-errors.log`，不会阻断 Codex。
+会话历史 Hook 不会改变 Shadow Git 快照。
 
 #### 安装步骤
 
@@ -108,7 +145,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\shadow-git.ps1 install-cod
 
 2. 安装命令会按需初始化本地基线，创建不存在的 `%USERPROFILE%\.codex\hooks.json`，保留已有 Hook，并在修改已有配置前创建带时间戳的备份。
 
-3. 重启 Codex CLI。之后每次提交用户输入时会先记录原始 prompt，并在该回合结束时由 `Stop` Hook 创建一个快照。
+3. 重启 Codex CLI。之后每次提交用户输入时会先记录原始 prompt，回合结束时由两个 `Stop` Hook 分别创建快照并追加会话历史。
 
 #### 验证安装
 
@@ -125,6 +162,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\shadow-git.ps1 
 ```
 
 将 `C:\src\my-project` 替换为第 1 步已安装的仓库。最后一条命令应显示新的回合，提交说明中包含 `task=verify shadow hook write`。Stop Hook 成功后会删除 `%LOCALAPPDATA%\shadow-git-turns\prompts` 中对应的临时 prompt 文件。
+
+会话历史集成提供了自动化回归测试：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\tests\verify-codex-session-history-hooks.ps1
+```
 
 ### 何时使用 app-server 客户端
 
@@ -143,3 +186,4 @@ Codex CLI 0.147.0 提供实验性的 JSON-RPC app-server 协议。只有在开�
 - Shadow Git 仓库仅保存在本地，且不配置远程地址。
 - 快照可能包含源代码和未跟踪文件；请保护好本地存储目录，避免把密钥或大型生成文件纳入快照。
 - 默认暂存行为遵循目标项目的 `.gitignore` 规则。
+- 会话历史 Markdown 会保存完整用户输入和 Agent 最终回答，其中可能含有凭据、个人信息或专有源码。请限制 `E:\codex-session-history` 的访问权限；不要将该目录加入项目仓库或上传，除非已单独完成内容审查。
