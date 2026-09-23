@@ -91,7 +91,18 @@ function Get-MessageText {
     }) -join ''
 }
 
-function Get-LatestFinalAnswer {
+function Get-UserMessageText {
+    param([object]$Message)
+
+    return @($Message.content | ForEach-Object {
+        $text = Get-PayloadText -Payload $_ -Name 'text'
+        if ((Get-PayloadText -Payload $_ -Name 'type') -eq 'input_text' -and $text -notmatch '^<image\b' -and $text -ne '</image>') {
+            $text
+        }
+    }) -join ''
+}
+
+function Get-TurnContent {
     param(
         [string]$TranscriptPath,
         [string]$Prompt,
@@ -100,45 +111,102 @@ function Get-LatestFinalAnswer {
 
     $currentTurnStarted = $false
     $answer = ''
-    # The active user message and final answer are at the end of the rollout.
-    # A bounded tail avoids loading a multi-megabyte transcript at Stop.
-    foreach ($line in Get-Content -LiteralPath $TranscriptPath -Encoding UTF8 -Tail 10000) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
+    $images = @()
+    $reader = $null
+    try {
+        # Read forward through the file. PowerShell's -Tail scans backwards and can
+        # take longer than the hook timeout when a JSONL record contains a huge line.
+        $stream = [System.IO.File]::Open(
+            $TranscriptPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+        $reader = [System.IO.StreamReader]::new(
+            $stream,
+            [System.Text.UTF8Encoding]::new($false, $true),
+            $true
+        )
 
-        try {
-            $record = $line | ConvertFrom-Json
-        }
-        catch {
-            continue
-        }
-
-        if ($record.type -ne 'response_item' -or $record.payload.type -ne 'message') {
-            continue
-        }
-
-        if ($record.payload.role -eq 'user') {
-            $metadataProperty = $record.payload.PSObject.Properties['internal_chat_message_metadata_passthrough']
-            $recordTurnId = if ($metadataProperty) { Get-PayloadText -Payload $metadataProperty.Value -Name 'turn_id' } else { '' }
-            $currentTurnStarted = ($recordTurnId -eq $TurnId -and (Get-MessageText -Message $record.payload) -ceq $Prompt)
-            if ($currentTurnStarted) {
-                $answer = ''
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
             }
-            continue
-        }
 
-        if (-not $currentTurnStarted -or $record.payload.role -ne 'assistant' -or (Get-PayloadText -Payload $record.payload -Name 'phase') -ne 'final_answer') {
-            continue
-        }
+            try {
+                $record = $line | ConvertFrom-Json
+            }
+            catch {
+                continue
+            }
 
-        $text = Get-MessageText -Message $record.payload
-        if (-not [string]::IsNullOrWhiteSpace($text)) {
-            $answer = $text
+            if ($record.type -ne 'response_item' -or $record.payload.type -ne 'message') {
+                continue
+            }
+
+            if ($record.payload.role -eq 'user') {
+                $metadataProperty = $record.payload.PSObject.Properties['internal_chat_message_metadata_passthrough']
+                $recordTurnId = if ($metadataProperty) { Get-PayloadText -Payload $metadataProperty.Value -Name 'turn_id' } else { '' }
+                $currentTurnStarted = ($recordTurnId -eq $TurnId -and (Get-UserMessageText -Message $record.payload) -ceq $Prompt)
+                if ($currentTurnStarted) {
+                    $answer = ''
+                    $images = @($record.payload.content | ForEach-Object {
+                        if ((Get-PayloadText -Payload $_ -Name 'type') -eq 'input_image') {
+                            Get-PayloadText -Payload $_ -Name 'image_url'
+                        }
+                    } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                }
+                continue
+            }
+
+            if (-not $currentTurnStarted -or $record.payload.role -ne 'assistant' -or (Get-PayloadText -Payload $record.payload -Name 'phase') -ne 'final_answer') {
+                continue
+            }
+
+            $text = Get-MessageText -Message $record.payload
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $answer = $text
+            }
+        }
+    }
+    finally {
+        if ($reader) {
+            $reader.Dispose()
         }
     }
 
-    return $answer
+    return [PSCustomObject]@{
+        Answer = $answer
+        Images = $images
+    }
+}
+
+function Save-TurnImages {
+    param(
+        [string[]]$ImageUrls,
+        [string]$ImageRoot,
+        [string]$TurnId
+    )
+
+    $references = @()
+    $imageNumber = 0
+    foreach ($imageUrl in @($ImageUrls)) {
+        if ($imageUrl -notmatch '^data:(image/(png|jpeg|gif|webp));base64,(.+)$') {
+            continue
+        }
+
+        $extension = switch ($matches[2]) {
+            'jpeg' { 'jpg' }
+            default { $matches[2] }
+        }
+        $imageNumber++
+        $fileName = "$TurnId-$imageNumber.$extension"
+        New-Item -ItemType Directory -Force -Path $ImageRoot | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $ImageRoot $fileName), [System.Convert]::FromBase64String($matches[3]))
+        $references += "![Image $imageNumber](_images/$fileName)"
+    }
+
+    return $references
 }
 
 function Get-WorkspaceFolderName {
@@ -151,15 +219,20 @@ function Get-WorkspaceFolderName {
     return ($name -replace '[\\/:*?"<>|]', '_')
 }
 
-function ConvertTo-MarkdownCodeBlock {
-    param([string]$Text)
+function ConvertTo-RenderableMarkdownBlock {
+    param(
+        [AllowEmptyString()]
+        [string]$Text,
+        [ValidateSet('user', 'agent')]
+        [string]$Role
+    )
 
-    $maxFenceLength = 2
-    foreach ($match in [regex]::Matches($Text, '`+')) {
-        $maxFenceLength = [Math]::Max($maxFenceLength, $match.Length)
-    }
-    $fence = -join ('`' * ($maxFenceLength + 1))
-    return "$fence`r`n$Text`r`n$fence"
+    $token = [guid]::NewGuid().ToString('N')
+    return @(
+        "<!-- codex-session-history:content-start role=$Role token=$token -->",
+        $Text,
+        "<!-- codex-session-history:content-end token=$token -->"
+    ) -join "`r`n"
 }
 
 function New-SessionDocumentHeader {
@@ -175,6 +248,68 @@ function New-SessionDocumentHeader {
         ('- Session ID: `' + $SessionId + '`'),
         ''
     ) -join "`r`n"
+}
+
+function Ensure-SearchIndexEntry {
+    param(
+        [string]$WorkspaceRoot,
+        [string]$Workspace,
+        [string]$SessionId,
+        [string]$TurnId,
+        [string]$MarkdownPath,
+        [string]$Prompt,
+        [string]$Answer,
+        [System.Text.Encoding]$Encoding
+    )
+
+    $indexPath = Join-Path $WorkspaceRoot '_index.jsonl'
+    $safeWorkspaceRoot = Get-SafeName $WorkspaceRoot
+    $mutex = New-Object System.Threading.Mutex($false, "codex-session-history-index-$safeWorkspaceRoot")
+    $lockAcquired = $false
+
+    try {
+        try {
+            $lockAcquired = $mutex.WaitOne(10000)
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $lockAcquired = $true
+        }
+        if (-not $lockAcquired) {
+            Write-HookError "could not acquire search index lock for session=$SessionId turn=$TurnId"
+            return
+        }
+
+        if (Test-Path -LiteralPath $indexPath) {
+            $indexMarker = '"turn_id":"' + $TurnId + '"'
+            foreach ($indexLine in [System.IO.File]::ReadLines($indexPath)) {
+                if ($indexLine.Contains($indexMarker)) {
+                    return
+                }
+            }
+        }
+
+        $entry = [ordered]@{
+            schema = 1
+            indexed_at = (Get-Date).ToUniversalTime().ToString('o')
+            workspace = $Workspace
+            session_id = $SessionId
+            turn_id = $TurnId
+            markdown = (Split-Path -Leaf $MarkdownPath)
+            user = $Prompt
+            agent = $Answer
+        }
+        $line = $entry | ConvertTo-Json -Compress -Depth 5
+        [System.IO.File]::AppendAllText($indexPath, $line + "`r`n", $Encoding)
+    }
+    catch {
+        Write-HookError "search index write failed for session=$SessionId turn=${TurnId}: $($_.Exception.Message)"
+    }
+    finally {
+        if ($lockAcquired) {
+            $mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+    }
 }
 
 try {
@@ -197,15 +332,18 @@ try {
 
     $cachePath = Get-PromptCachePath -SessionId $sessionId -TurnId $turnId
     $prompt = Get-CapturedPrompt -CachePath $cachePath
-    if ([string]::IsNullOrWhiteSpace($prompt)) {
+    if (-not (Test-Path -LiteralPath $cachePath)) {
         exit 0
     }
 
     $answer = ''
+    $images = @()
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
         $transcript = Get-SessionTranscriptPath -Root $SessionRoot -SessionId $sessionId
         if ($transcript) {
-            $answer = Get-LatestFinalAnswer -TranscriptPath $transcript.FullName -Prompt $prompt -TurnId $turnId
+            $turnContent = Get-TurnContent -TranscriptPath $transcript.FullName -Prompt $prompt -TurnId $turnId
+            $answer = $turnContent.Answer
+            $images = $turnContent.Images
             if (-not [string]::IsNullOrWhiteSpace($answer)) {
                 break
             }
@@ -224,9 +362,10 @@ try {
     $safeSessionId = Get-SafeName $sessionId
     $safeTurnId = Get-SafeName $turnId
     $markdownPath = Join-Path $workspaceRoot "$safeSessionId.md"
+    $imageRoot = Join-Path $workspaceRoot '_images'
     $marker = "<!-- codex-session-history:turn=$safeTurnId -->"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $mutex = New-Object System.Threading.Mutex($false, "codex-session-history-$safeSessionId-$safeTurnId")
+    $mutex = New-Object System.Threading.Mutex($false, "codex-session-history-$safeSessionId")
     $lockAcquired = $false
 
     try {
@@ -248,6 +387,13 @@ try {
 
         $existing = [System.IO.File]::ReadAllText($markdownPath)
         if (-not $existing.Contains($marker)) {
+            $imageReferences = Save-TurnImages -ImageUrls $images -ImageRoot $imageRoot -TurnId $safeTurnId
+            $userContent = @((ConvertTo-RenderableMarkdownBlock -Text $prompt -Role 'user'))
+            if (@($imageReferences).Count -gt 0) {
+                $userContent += ''
+                $userContent += $imageReferences
+            }
+            $userContentText = $userContent -join "`r`n"
             $entry = @(
                 '',
                 $marker,
@@ -256,15 +402,25 @@ try {
                 '',
                 '### User',
                 '',
-                (ConvertTo-MarkdownCodeBlock -Text $prompt),
+                $userContentText,
                 '',
                 '### Agent',
                 '',
-                (ConvertTo-MarkdownCodeBlock -Text $answer),
+                (ConvertTo-RenderableMarkdownBlock -Text $answer -Role 'agent'),
                 ''
             ) -join "`r`n"
             [System.IO.File]::AppendAllText($markdownPath, $entry, $utf8NoBom)
         }
+
+        Ensure-SearchIndexEntry `
+            -WorkspaceRoot $workspaceRoot `
+            -Workspace $resolvedWorkspace `
+            -SessionId $sessionId `
+            -TurnId $safeTurnId `
+            -MarkdownPath $markdownPath `
+            -Prompt $prompt `
+            -Answer $answer `
+            -Encoding $utf8NoBom
 
         if (Test-Path -LiteralPath $cachePath) {
             Remove-Item -LiteralPath $cachePath -Force

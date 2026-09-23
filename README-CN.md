@@ -133,7 +133,55 @@ E:\codex-session-history\<工作空间目录名>\<session-id>.md
 Markdown 文件头会保留解析后的完整工作空间路径；每个回合带有 `turn_id` 标记，
 重复触发 `Stop` 不会重复写入。历史记录错误会写入
 `%LOCALAPPDATA%\codex-session-history\hook-errors.log`，不会阻断 Codex。
+User 和 Agent 正文以原生 Markdown 保存，并由不可见的 HTML 注释标记内容边界；
+标题、列表、链接和正文自己的代码块可由 Markdown 查看器正常渲染。
+图片会保存到工作空间目录的 `_images` 子目录，并由 Markdown 通过相对路径引用。
 会话历史 Hook 不会改变 Shadow Git 快照。
+
+#### 快速检索
+
+现有存储结构保持不变：每个 session 仍对应一个 Markdown 文件，每个 turn
+仍由文件内的 `turn_id` 标记定位。Stop Hook 同时在工作空间目录维护旁路索引：
+
+```text
+E:\codex-session-history\<工作空间目录名>\_index.jsonl
+```
+
+索引每行对应一个 turn，包含工作空间、session ID、turn ID、Markdown 文件名、
+完整用户输入和 Agent 最终回答。Markdown 是主记录，索引可随时删除并重建。
+
+按关键词检索全部工作空间：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\search-codex-session-history.ps1 -Query "写入失败"
+```
+
+限定工作空间、session 和返回数量：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\search-codex-session-history.ps1 `
+  -Query "图片" -Workspace C:\src\my-project -SessionId <session-id> -Limit 20
+```
+
+默认结果包含用户和 Agent 文本预览、turn ID 以及可直接打开的 `MarkdownPath`。
+使用 `-Full` 可返回完整文本。首次启用索引或需要修复索引时，从现有 Markdown 重建：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\rebuild-codex-session-history-index.ps1
+```
+
+也可以用 `-Workspace C:\src\my-project` 只重建一个工作空间。重建会覆盖对应的
+`_index.jsonl`，不会修改 session Markdown 或 `_images`。
+
+旧记录若仍将整个 User/Agent 正文包在代码块中，可在重建索引的同时迁移为可渲染格式：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\rebuild-codex-session-history-index.ps1 -RenderMarkdown
+```
+
+迁移只替换旧的最外层代码块，保留 session、turn、正文和图片引用；脚本会在校验
+迁移前后 turn 数与正文一致后，以同目录临时文件原子替换原文件。可先加 `-WhatIf`
+查看待处理文件，或配合 `-Workspace` 仅迁移一个工作空间。
 
 #### 安装步骤
 
@@ -186,4 +234,4 @@ Codex CLI 0.147.0 提供实验性的 JSON-RPC app-server 协议。只有在开�
 - Shadow Git 仓库仅保存在本地，且不配置远程地址。
 - 快照可能包含源代码和未跟踪文件；请保护好本地存储目录，避免把密钥或大型生成文件纳入快照。
 - 默认暂存行为遵循目标项目的 `.gitignore` 规则。
-- 会话历史 Markdown 会保存完整用户输入和 Agent 最终回答，其中可能含有凭据、个人信息或专有源码。请限制 `E:\codex-session-history` 的访问权限；不要将该目录加入项目仓库或上传，除非已单独完成内容审查。
+- 会话历史 Markdown 和 `_index.jsonl` 会保存完整用户输入和 Agent 最终回答，其中可能含有凭据、个人信息或专有源码。请限制 `E:\codex-session-history` 的访问权限；不要将该目录加入项目仓库或上传，除非已单独完成内容审查。

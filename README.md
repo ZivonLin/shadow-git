@@ -136,7 +136,63 @@ E:\codex-session-history\<workspace-name>\<session-id>.md
 The Markdown header keeps the resolved workspace path. Each turn has a marker
 containing its `turn_id`, so a retried `Stop` event is idempotent. History errors
 are written to `%LOCALAPPDATA%\codex-session-history\hook-errors.log` and do not
-block Codex. The session-history hooks do not change Shadow Git snapshots.
+block Codex. User and Agent bodies are stored as native Markdown between invisible
+HTML-comment boundaries, so headings, lists, links, and nested code blocks render
+normally. Attached images are saved under the workspace `_images` directory
+and referenced relatively from the session Markdown. The session-history hooks
+do not change Shadow Git snapshots.
+
+#### Fast search
+
+The storage layout remains unchanged: each session still has one Markdown file,
+and each turn remains addressable by its `turn_id` marker. The Stop hook also
+maintains a sidecar index in each workspace history directory:
+
+```text
+E:\codex-session-history\<workspace-name>\_index.jsonl
+```
+
+Each line represents one turn and contains the workspace, session ID, turn ID,
+Markdown filename, complete user prompt, and final agent answer. Markdown is the
+source of truth; the index can be deleted and rebuilt at any time.
+
+Search all workspace indexes for literal text, case-insensitively:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\search-codex-session-history.ps1 -Query "write failed"
+```
+
+Limit the search by workspace, session, and result count:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\search-codex-session-history.ps1 `
+  -Query "image" -Workspace C:\src\my-project -SessionId <session-id> -Limit 20
+```
+
+Results include user and agent previews, the turn ID, and an openable
+`MarkdownPath`. Pass `-Full` to return the complete text. To initialize or repair
+indexes from existing Markdown history, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\rebuild-codex-session-history-index.ps1
+```
+
+Pass `-Workspace C:\src\my-project` to rebuild one workspace only. Rebuilding
+overwrites the selected `_index.jsonl` files without changing session Markdown
+or `_images`.
+
+To migrate legacy records whose entire User and Agent bodies are wrapped in code
+fences, rebuild with the rendering option:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\ShadowGit\rebuild-codex-session-history-index.ps1 -RenderMarkdown
+```
+
+Migration replaces only the legacy outer fences and preserves sessions, turns,
+body text, and image references. After validating turn counts and content, it
+atomically replaces each changed file through a same-directory temporary file.
+Add `-WhatIf` to preview affected files, or combine it with `-Workspace` to migrate
+one workspace.
 
 #### Installation
 
@@ -207,7 +263,8 @@ shadow snapshot.
 - Snapshot contents can include source code and untracked files; protect the
   local store and avoid snapshotting secrets or large generated directories.
 - The default staging behavior follows the project's `.gitignore` rules.
-- Session-history Markdown files contain complete user prompts and final agent
-  answers. They can include credentials, personal data, or proprietary source;
-  keep `E:\codex-session-history` access-restricted and do not add it to a
-  project repository or upload it without a separate content review.
+- Session-history Markdown files and `_index.jsonl` contain complete user
+  prompts and final agent answers. They can include credentials, personal data,
+  or proprietary source; keep `E:\codex-session-history` access-restricted and
+  do not add it to a project repository or upload it without a separate content
+  review.

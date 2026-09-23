@@ -63,10 +63,6 @@ try {
     }
 
     $prompt = Get-PayloadText -Payload $payload -Name 'prompt'
-    if ([string]::IsNullOrWhiteSpace($prompt)) {
-        exit 0
-    }
-
     $cachePath = Get-PromptCachePath -SessionId (Get-PayloadText -Payload $payload -Name 'session_id') -TurnId (Get-PayloadText -Payload $payload -Name 'turn_id')
     if (-not $cachePath) {
         exit 0
